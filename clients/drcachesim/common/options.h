@@ -52,6 +52,7 @@
 #define VIEW "view"
 #define FUNC_VIEW "func_view"
 #define INVARIANT_CHECKER "invariant_checker"
+#define NULL_ANALYZER "null_analyzer"
 #define CACHE_TYPE_INSTRUCTION "instruction"
 #define CACHE_TYPE_DATA "data"
 #define CACHE_TYPE_UNIFIED "unified"

@@ -48,6 +48,7 @@
 #include "../tools/view_create.h"
 #include "../tools/func_view_create.h"
 #include "../tools/invariant_checker_create.h"
+#include "../tools/null_analyzer_create.h"
 #include "../tracer/raw2trace.h"
 #include "../tracer/raw2trace_directory.h"
 #include <fstream>
@@ -208,11 +209,13 @@ drmemtrace_analysis_tool_create()
                                      op_verbose.get_value());
     } else if (op_simulator_type.get_value() == INVARIANT_CHECKER) {
         return invariant_checker_create(op_offline.get_value(), op_verbose.get_value());
+    } else if (op_simulator_type.get_value() == NULL_ANALYZER) {
+        return null_analyzer_tool_create();
     } else {
         ERRMSG("Usage error: unsupported analyzer type. "
                "Please choose " CPU_CACHE ", " MISS_ANALYZER ", " TLB ", " HISTOGRAM
                ", " REUSE_DIST ", " BASIC_COUNTS ", " OPCODE_MIX ", " VIEW
-               " or " FUNC_VIEW ".\n");
+               ", " FUNC_VIEW " or " NULL_ANALYZER ".\n");
         return nullptr;
     }
 }

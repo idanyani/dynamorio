@@ -1248,6 +1248,18 @@ _tmain(int argc, TCHAR *targv[])
     native_tool[0] = '\0';
 #endif
 
+    /* Quick pass to set verbose for info() logs before main parsing. */
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-verbose") == 0 || strcmp(argv[i], "-v") == 0) {
+            verbose = true;
+            break;
+        }
+        if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "-t") == 0 ||
+            strcmp(argv[i], "-c32") == 0 || strcmp(argv[i], "-c64") == 0 ||
+            strcmp(argv[i], "--") == 0)
+            break;
+    }
+
     /* default root: we assume this tool is in <root>/bin{32,64}/dr*.exe */
     get_absolute_path(argv[0], buf, BUFFER_SIZE_ELEMENTS(buf));
     NULL_TERMINATE_BUFFER(buf);

@@ -248,6 +248,8 @@ DR_API
  * - There can only be one far branch (call, jump, or return) in
  * a basic block, and it must be the final instruction in the
  * block.
+ * - The AArch64 instruction ISB must be the final instruction in the
+ * block.
  * - The exit control-flow of a block ending in a system call or
  * int instruction cannot be changed, nor can instructions be inserted
  * after the system call or int instruction itself, unless
@@ -682,7 +684,8 @@ typedef struct _dr_fault_fragment_info_t {
     /**
      * The start address of the code fragment inside the code cache at
      * the exception/signal/translation interruption point. NULL for interruption
-     * not in the code cache.  Clients are cautioned when examining
+     * not in the code cache (in which case generally only unusual cases of clients
+     * changing memory require restoration).  Clients are cautioned when examining
      * code cache instructions to not rely on any details of code
      * inserted other than their own.
      */
@@ -706,7 +709,8 @@ typedef struct _dr_fault_fragment_info_t {
      * When the recreated ilist is not available, this is set to NULL. This
      * may happen when a client returns #DR_EMIT_STORE_TRANSLATIONS, or for
      * DR internal reasons when the app code may not be consistent: for pending
-     * deletion or self-modifying fragments.
+     * deletion or self-modifying fragments.  It will also be NULL for non-code-cache
+     * cases where \p cache_start_pc is also NULL.
      */
     instrlist_t *ilist;
 } dr_fault_fragment_info_t;

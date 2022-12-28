@@ -38,6 +38,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <atomic>
 #include "dr_api.h"
 #include "drvector.h"
 #include "trace_entry.h"
@@ -179,6 +180,7 @@ public:
         , disable_optimizations_(disable_opts)
         , instr_size_(instruction_size)
     {
+        frozen_timestamp_.store(0, std::memory_order_release);
     }
     virtual ~instru_t()
     {
@@ -221,10 +223,15 @@ public:
     // This is a per-buffer-writeout header.
     virtual int
     append_unit_header(byte *buf_ptr, thread_id_t tid, ptr_int_t window) = 0;
+    // The entry at buf_ptr must be a timestamp.
+    // If the timestamp value is < min_timestamp, replaces it with min_timestamp
+    // and returns true; else returns false.
+    virtual bool
+    refresh_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) = 0;
     virtual void
     set_frozen_timestamp(uint64 timestamp)
     {
-        frozen_timestamp_ = timestamp;
+        frozen_timestamp_.store(timestamp, std::memory_order_release);
     }
 
     // These insert inlined code to add an entry into the trace buffer.
@@ -239,6 +246,10 @@ public:
     instrument_ibundle(void *drcontext, instrlist_t *ilist, instr_t *where,
                        reg_id_t reg_ptr, int adjust, instr_t **delay_instrs,
                        int num_delay_instrs) = 0;
+    virtual int
+    instrument_instr_encoding(void *drcontext, void *tag, void *bb_field,
+                              instrlist_t *ilist, instr_t *where, reg_id_t reg_ptr,
+                              int adjust, instr_t *app) = 0;
 
     virtual void
     bb_analysis(void *drcontext, void *tag, void **bb_field, instrlist_t *ilist,
@@ -288,8 +299,8 @@ protected:
     drvector_t *reg_vector_;
     bool disable_optimizations_;
     // Stores a timestamp to use for all future unit headers.  This is meant for
-    // avoiding time gaps for max-limit scenarios (i#5021).
-    uint64 frozen_timestamp_ = 0;
+    // avoiding time gaps for -align_endpoints or max-limit scenarios (i#5021).
+    std::atomic<uint64> frozen_timestamp_;
 
 private:
     instru_t()
@@ -335,6 +346,8 @@ public:
     append_thread_header(byte *buf_ptr, thread_id_t tid, offline_file_type_t file_type);
     int
     append_unit_header(byte *buf_ptr, thread_id_t tid, ptr_int_t window) override;
+    bool
+    refresh_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) override;
 
     int
     instrument_memref(void *drcontext, void *bb_field, instrlist_t *ilist, instr_t *where,
@@ -347,6 +360,10 @@ public:
     instrument_ibundle(void *drcontext, instrlist_t *ilist, instr_t *where,
                        reg_id_t reg_ptr, int adjust, instr_t **delay_instrs,
                        int num_delay_instrs) override;
+    int
+    instrument_instr_encoding(void *drcontext, void *tag, void *bb_field,
+                              instrlist_t *ilist, instr_t *where, reg_id_t reg_ptr,
+                              int adjust, instr_t *app) override;
 
     void
     bb_analysis(void *drcontext, void *tag, void **bb_field, instrlist_t *ilist,
@@ -356,8 +373,8 @@ public:
 
 private:
     void
-    insert_save_pc(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t base,
-                   reg_id_t scratch, app_pc pc, int adjust);
+    insert_save_immed(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t base,
+                      reg_id_t scratch, ptr_int_t immed, int adjust);
     void
     insert_save_addr(void *drcontext, instrlist_t *ilist, instr_t *where,
                      reg_id_t reg_ptr, reg_id_t reg_addr, int adjust, opnd_t ref);
@@ -412,6 +429,8 @@ public:
     append_thread_header(byte *buf_ptr, thread_id_t tid, offline_file_type_t file_type);
     int
     append_unit_header(byte *buf_ptr, thread_id_t tid, ptr_int_t window) override;
+    bool
+    refresh_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) override;
 
     int
     instrument_memref(void *drcontext, void *bb_field, instrlist_t *ilist, instr_t *where,
@@ -424,6 +443,10 @@ public:
     instrument_ibundle(void *drcontext, instrlist_t *ilist, instr_t *where,
                        reg_id_t reg_ptr, int adjust, instr_t **delay_instrs,
                        int num_delay_instrs) override;
+    int
+    instrument_instr_encoding(void *drcontext, void *tag, void *bb_field,
+                              instrlist_t *ilist, instr_t *where, reg_id_t reg_ptr,
+                              int adjust, instr_t *app) override;
 
     void
     bb_analysis(void *drcontext, void *tag, void **bb_field, instrlist_t *ilist,

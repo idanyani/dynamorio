@@ -255,6 +255,68 @@ opnd_size_suffix_intel(opnd_t opnd)
     return "";
 }
 
+#ifdef AARCHXX
+static const char *
+opnd_size_element_suffix(opnd_t opnd)
+{
+    int sz = opnd_get_vector_element_size(opnd);
+    switch (sz) {
+    case OPSZ_1: return ".b";
+    case OPSZ_2: return ".h";
+    case OPSZ_4: return ".s";
+    case OPSZ_8: return ".d";
+    case OPSZ_16: return ".q";
+    }
+    return "";
+}
+
+static const char *
+aarch64_reg_opnd_suffix(opnd_t opnd)
+{
+    if (opnd_is_element_vector_reg(opnd))
+        return opnd_size_element_suffix(opnd);
+    if (opnd_is_predicate_merge(opnd))
+        return "/m";
+    if (opnd_is_predicate_zero(opnd))
+        return "/z";
+
+    return "";
+}
+#endif
+#ifdef AARCH64
+bool
+aarch64_predicate_constraint_is_mapped(ptr_int_t value)
+{
+    return value >= DR_PRED_CONSTR_FIRST_NUMBER && value <= DR_PRED_CONSTR_LAST_NUMBER;
+}
+
+static const char *
+aarch64_predicate_constraint_string(ptr_int_t value)
+{
+    switch (value) {
+    case DR_PRED_CONSTR_POW2: return "POW2";
+    case DR_PRED_CONSTR_VL1: return "VL1";
+    case DR_PRED_CONSTR_VL2: return "VL2";
+    case DR_PRED_CONSTR_VL3: return "VL3";
+    case DR_PRED_CONSTR_VL4: return "VL4";
+    case DR_PRED_CONSTR_VL5: return "VL5";
+    case DR_PRED_CONSTR_VL6: return "VL6";
+    case DR_PRED_CONSTR_VL7: return "VL7";
+    case DR_PRED_CONSTR_VL8: return "VL8";
+    case DR_PRED_CONSTR_VL16: return "VL16";
+    case DR_PRED_CONSTR_VL32: return "VL32";
+    case DR_PRED_CONSTR_VL64: return "VL64";
+    case DR_PRED_CONSTR_VL128: return "VL128";
+    case DR_PRED_CONSTR_VL256: return "VL256";
+    case DR_PRED_CONSTR_MUL4: return "MUL4";
+    case DR_PRED_CONSTR_MUL3: return "MUL3";
+    case DR_PRED_CONSTR_ALL: return "ALL";
+    default: return "UKNOWN_CONSTRAINT";
+    }
+}
+
+#endif
+
 static void
 opnd_mem_disassemble_prefix(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
 {
@@ -556,6 +618,11 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
          */
         if (TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask))) {
             print_to_buffer(buf, bufsz, sofar, "%s%s%d", immed_prefix(), sign, (uint)val);
+#ifdef AARCH64
+        } else if (TEST(opnd_get_flags(opnd), DR_OPND_IS_PREDICATE_CONSTRAINT) &&
+                   !aarch64_predicate_constraint_is_mapped(val)) {
+            print_to_buffer(buf, bufsz, sofar, aarch64_predicate_constraint_string(val));
+#endif
         } else if (sz <= 1) {
             print_to_buffer(buf, bufsz, sofar, "%s%s0x%02x", immed_prefix(), sign,
                             (uint)((byte)val));
@@ -630,7 +697,7 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
         break;
     case REG_kind:
         reg_disassemble(buf, bufsz, sofar, opnd_get_reg(opnd), opnd_get_flags(opnd), "",
-                        "");
+                        IF_AARCHXX_ELSE(aarch64_reg_opnd_suffix(opnd), ""));
         break;
     case BASE_DISP_kind: opnd_base_disp_disassemble(buf, bufsz, sofar, opnd); break;
 #if defined(X64) || defined(ARM)

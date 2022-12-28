@@ -42,18 +42,26 @@
 #include <mutex>
 #include <stack>
 #include <unordered_map>
+#include <vector>
 
 class invariant_checker_t : public analysis_tool_t {
 public:
     invariant_checker_t(bool offline = true, unsigned int verbose = 0,
-                        std::string test_name = "");
+                        std::string test_name = "",
+                        std::istream *serial_schedule_file = nullptr,
+                        std::istream *cpu_schedule_file = nullptr);
     virtual ~invariant_checker_t();
+    std::string
+    initialize_stream(memtrace_stream_t *serial_stream) override;
     bool
     process_memref(const memref_t &memref) override;
     bool
     print_results() override;
     bool
     parallel_shard_supported() override;
+    void *
+    parallel_shard_init_stream(int shard_index, void *worker_data,
+                               memtrace_stream_t *shard_stream) override;
     void *
     parallel_shard_init(int shard_index, void *worker_data) override;
     bool
@@ -74,6 +82,7 @@ protected:
             prev_xfer_marker_.marker.marker_type = TRACE_MARKER_TYPE_VERSION;
             last_xfer_marker_.marker.marker_type = TRACE_MARKER_TYPE_VERSION;
         }
+        memtrace_stream_t *stream = nullptr;
         memref_t prev_entry_ = {};
         memref_t prev_instr_ = {};
         memref_t prev_xfer_marker_ = {}; // Cleared on seeing an instr.
@@ -88,15 +97,16 @@ protected:
         int instrs_until_interrupt_ = -1;
         int memrefs_until_interrupt_ = -1;
 #endif
+        bool saw_kernel_xfer_after_prev_instr_ = false;
         bool saw_timestamp_but_no_instr_ = false;
         bool found_cache_line_size_marker_ = false;
         bool found_instr_count_marker_ = false;
         bool found_page_size_marker_ = false;
         uint64_t last_instr_count_marker_ = 0;
-        std::string error;
+        std::string error_;
         // Track the location of errors.
-        memref_tid_t tid = -1;
-        uint64_t ref_count = 0;
+        memref_tid_t tid_ = -1;
+        uint64_t ref_count_ = 0;
         // We do not expect these to vary by thread but it is simpler to keep
         // separate values per thread as we discover their values during parallel
         // operation.
@@ -104,6 +114,12 @@ protected:
         offline_file_type_t file_type_ = OFFLINE_FILE_TYPE_DEFAULT;
         uintptr_t last_window_ = 0;
         bool window_transition_ = false;
+        uint64_t chunk_instr_count_ = 0;
+        uint64_t instr_count_ = 0;
+        uint64_t last_timestamp_ = 0;
+        std::vector<schedule_entry_t> sched_;
+        std::unordered_map<uint64_t, std::vector<schedule_entry_t>> cpu2sched_;
+        bool skipped_instrs_ = false;
     };
 
     // We provide this for subclasses to run these invariants with custom
@@ -111,6 +127,8 @@ protected:
     virtual void
     report_if_false(per_shard_t *shard, bool condition,
                     const std::string &invariant_name);
+    virtual void
+    check_schedule_data();
 
     // The keys here are int for parallel, tid for serial.
     std::unordered_map<memref_tid_t, std::unique_ptr<per_shard_t>> shard_map_;
@@ -122,6 +140,11 @@ protected:
     unsigned int knob_verbose_;
     std::string knob_test_name_;
     bool has_annotations_ = false;
+
+    std::istream *serial_schedule_file_ = nullptr;
+    std::istream *cpu_schedule_file_ = nullptr;
+
+    memtrace_stream_t *serial_stream_ = nullptr;
 };
 
 #endif /* _INVARIANT_CHECKER_H_ */

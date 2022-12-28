@@ -42,6 +42,7 @@
 #include <unordered_map>
 // For exporting we avoid "../common" and rely on -I.
 #include "memref.h"
+#include "memtrace_stream.h"
 #include "utils.h"
 
 #define OUT /* just a marker */
@@ -58,15 +59,24 @@
 #    define VPRINT(reader, level, ...) /* nothing */
 #endif
 
-class reader_t : public std::iterator<std::input_iterator_tag, memref_t> {
+/**
+ * Iterator over #memref_t trace entries. This class converts a trace
+ * (offline or online) into a stream of #memref_t entries. It also
+ * provides more information about the trace using the
+ * #memtrace_stream_t API.
+ */
+class reader_t : public std::iterator<std::input_iterator_tag, memref_t>,
+                 public memtrace_stream_t {
 public:
     reader_t()
     {
+        cur_ref_ = {};
     }
     reader_t(int verbosity, const char *prefix)
         : verbosity_(verbosity)
         , output_prefix_(prefix)
     {
+        cur_ref_ = {};
     }
     virtual ~reader_t()
     {
@@ -98,6 +108,18 @@ public:
     virtual reader_t &
     operator++();
 
+    // Skips records until "count" instruction records have been passed.
+    // This will skip top-level headers for a thread; it is up to the caller
+    // to first observe those before skipping, if needed.  For interleaved-thread
+    // iteration, top-level headers in other threads will be skipped as well
+    // (but generally speaking these are identical to the initial thread).
+    // TODO i#5538: Add access to these header values from #memtrace_stream_t
+    // and document it here.
+    // TODO i#5538: Skipping from the middle will not always duplicate the
+    // last timestamp,cpu.
+    virtual reader_t &
+    skip_instructions(uint64_t instruction_count);
+
     // Supplied for subclasses that may fail in their constructors.
     virtual bool
     operator!()
@@ -111,6 +133,49 @@ public:
     // 2) It is difficult to implement for file_reader_t as streams do not
     //    have a copy constructor.
 
+    uint64_t
+    get_record_ordinal() const override
+    {
+        if (suppress_ref_count_ >= 0)
+            return 0;
+        return cur_ref_count_;
+    }
+    uint64_t
+    get_instruction_ordinal() const override
+    {
+        return cur_instr_count_;
+    }
+    uint64_t
+    get_last_timestamp() const override
+    {
+        return last_timestamp_;
+    }
+    uint64_t
+    get_version() const override
+    {
+        return version_;
+    }
+    uint64_t
+    get_filetype() const override
+    {
+        return filetype_;
+    }
+    uint64_t
+    get_cache_line_size() const override
+    {
+        return cache_line_size_;
+    }
+    uint64_t
+    get_chunk_instr_count() const override
+    {
+        return chunk_instr_count_;
+    }
+    uint64_t
+    get_page_size() const override
+    {
+        return page_size_;
+    }
+
 protected:
     // This reads the next entry from the stream of entries from all threads interleaved
     // in timestamp order.
@@ -122,6 +187,10 @@ protected:
     virtual bool
     read_next_thread_entry(size_t thread_index, OUT trace_entry_t *entry,
                            OUT bool *eof) = 0;
+    // This updates internal state for the just-read input_entry_.
+    // Returns whether a new memref record is now available.
+    virtual bool
+    process_input_entry();
 
     // Following typical stream iterator convention, the default constructor
     // produces an EOF object.
@@ -132,9 +201,25 @@ protected:
     int verbosity_ = 0;
     bool online_ = true;
     const char *output_prefix_ = "[reader]";
+    uint64_t cur_ref_count_ = 0;
+    int64_t suppress_ref_count_ = -1;
+    uint64_t cur_instr_count_ = 0;
+    uint64_t last_timestamp_instr_count_ = 0;
+    uint64_t last_timestamp_ = 0;
+    trace_entry_t *input_entry_ = nullptr;
+    // Remember top-level headers for the memtrace_stream_t interface.
+    uint64_t version_ = 0;
+    uint64_t filetype_ = 0;
+    uint64_t cache_line_size_ = 0;
+    uint64_t chunk_instr_count_ = 0;
+    uint64_t page_size_ = 0;
 
 private:
-    trace_entry_t *input_entry_ = nullptr;
+    struct encoding_info_t {
+        size_t size = 0;
+        unsigned char bits[MAX_ENCODING_LENGTH];
+    };
+
     memref_t cur_ref_;
     memref_tid_t cur_tid_ = 0;
     memref_pid_t cur_pid_ = 0;
@@ -143,10 +228,10 @@ private:
     addr_t prev_instr_addr_ = 0;
     int bundle_idx_ = 0;
     std::unordered_map<memref_tid_t, memref_pid_t> tid2pid_;
-    uint64_t cur_instr_count_ = 0;
-    uint64_t chunk_instr_count_ = 0; // Unchanging once set to non-zero.
-    uint64_t last_timestamp_instr_count_ = 0;
     bool skip_next_cpu_ = false;
+    bool expect_no_encodings_ = true;
+    encoding_info_t last_encoding_;
+    std::unordered_map<addr_t, encoding_info_t> encodings_;
 };
 
 #endif /* _READER_H_ */

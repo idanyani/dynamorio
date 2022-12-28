@@ -38,6 +38,7 @@
 #ifndef _FILE_READER_H_
 #define _FILE_READER_H_ 1
 
+#include <inttypes.h>
 #include <string.h>
 #include <fstream>
 #include <queue>
@@ -46,6 +47,7 @@
 #include "memref.h"
 #include "directory_iterator.h"
 #include "trace_entry.h"
+#include "utils.h"
 
 #ifndef ZHEX64_FORMAT_STRING
 /* We avoid dr_defines.h to keep this code separated and simpler for using with
@@ -54,15 +56,12 @@
 #    ifdef WINDOWS
 #        define ZHEX64_FORMAT_STRING "%016I64x"
 #    else
-#        if defined(__i386__) || defined(__arm__) || defined(__APPLE__)
-#            define ZHEX64_FORMAT_STRING "%016llx"
-#        else
-#            define ZHEX64_FORMAT_STRING "%016lx"
-#        endif
+#        define ZHEX64_FORMAT_STRING "%" PRIx64
 #    endif
 #endif
 
-/* We templatize on the file type itself for specializing for compression and
+/**
+ * We templatize on the file type itself for specializing for compression and
  * other different types.  An alternative would be to require a std::istream
  * interface and add gzip_istream_t (paralleling gzip_ostream_t used for
  * raw2trace).
@@ -99,6 +98,46 @@ public:
     virtual bool
     is_complete();
 
+    std::string
+    get_stream_name() const override
+    {
+        size_t ind = input_path_.find_last_of(DIRSEP);
+        if (ind == std::string::npos)
+            return input_path_;
+        return input_path_.substr(ind + 1);
+    }
+
+    reader_t &
+    skip_instructions(uint64_t instruction_count) override
+    {
+        if (instruction_count == 0)
+            return *this;
+        if (input_files_.size() > 1) {
+            // TODO i#5538: For fast thread-interleaved (whether serial here or the
+            // forthcoming per-cpu iteration) we need to read in the schedule file(s)
+            // that raw2trace writes out so that we can compute how far to separately
+            // fast-skip in each interleaved thread by calling the per-thread version.
+            // We'll also need to update the memref pid+tid state since we're not
+            // repeating top headers in every thread after a skip.  For now this is a
+            // slow linear walk.
+            return reader_t::skip_instructions(instruction_count);
+        }
+        // If the user asks to skip from the very start, we still need to find the chunk
+        // count marker and drain the header queue and populate the stream header values.
+        // XXX: We assume the page size is the final header; it is complex to wait for
+        // the timestamp as we don't want to read it yet.
+        while (page_size_ == 0) {
+            input_entry_ = read_next_entry();
+            process_input_entry();
+        }
+        if (!queues_[0].empty())
+            ERRMSG("Failed to drain header queue\n");
+        bool eof = false;
+        if (!skip_thread_instructions(0, instruction_count, &eof) || eof)
+            at_eof_ = true;
+        return *this;
+    }
+
 protected:
     bool
     read_next_thread_entry(size_t thread_index, OUT trace_entry_t *entry,
@@ -128,7 +167,9 @@ protected:
             }
             for (; iter != end; ++iter) {
                 std::string fname = *iter;
-                if (fname == "." || fname == "..")
+                if (fname == "." || fname == ".." ||
+                    starts_with(fname, DRMEMTRACE_SERIAL_SCHEDULE_FILENAME) ||
+                    fname == DRMEMTRACE_CPU_SCHEDULE_FILENAME)
                     continue;
                 // Skip the auxiliary files.
                 if (fname == DRMEMTRACE_MODULE_LIST_FILENAME ||
@@ -182,6 +223,9 @@ protected:
                 return false;
             }
             // Read the meta entries until we hit the pid.
+            // We want to pass the tid+pid to the reader *before* any markers,
+            // even though 2 markers preced the tid+pid in the file.
+            std::queue<trace_entry_t> marker_queue;
             while (read_next_thread_entry(index_, &next, &thread_eof_[index_])) {
                 if (next.type == TRACE_TYPE_PID) {
                     // We assume the pid entry is the last, right before the timestamp.
@@ -190,7 +234,7 @@ protected:
                 } else if (next.type == TRACE_TYPE_THREAD)
                     tids_[index_] = next;
                 else if (next.type == TRACE_TYPE_MARKER)
-                    queues_[index_].push(next);
+                    marker_queue.push(next);
                 else {
                     ERRMSG("Unexpected trace sequence for input file #%zu\n", index_);
                     return false;
@@ -202,6 +246,10 @@ protected:
             // the first entry.
             queues_[index_].push(tids_[index_]);
             queues_[index_].push(pid);
+            while (!marker_queue.empty()) {
+                queues_[index_].push(marker_queue.front());
+                marker_queue.pop();
+            }
         }
         index_ = input_files_.size();
 
@@ -292,6 +340,25 @@ protected:
             return &entry_copy_;
         }
         return nullptr;
+    }
+
+    virtual bool
+    skip_thread_instructions(size_t thread_index, uint64_t instruction_count,
+                             OUT bool *eof)
+    {
+        // Default implementation for file types that have no fast seeking and must do a
+        // linear walk.
+        uint64_t stop_count_ = cur_instr_count_ + instruction_count + 1;
+        while (cur_instr_count_ < stop_count_) {
+            if (!read_next_thread_entry(thread_index, &entry_copy_, eof))
+                return false;
+            // Update core state.
+            input_entry_ = &entry_copy_;
+            process_input_entry();
+            // TODO i#5538: Remember the last timestamp+cpu and insert it; share
+            // code with the zipfile reader.
+        }
+        return true;
     }
 
 private:

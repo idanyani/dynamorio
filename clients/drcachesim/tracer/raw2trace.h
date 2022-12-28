@@ -41,16 +41,20 @@
  * @brief DrMemtrace offline trace post-processing customization.
  */
 
+#define NOMINMAX // Avoid windows.h messing up std::min.
 #include "dr_api.h"
 #include "drmemtrace.h"
 #include "drcovlib.h"
 #include <array>
 #include <atomic>
+#include <list>
 #include <memory>
+#include <set>
 #include <unordered_map>
 #include "trace_entry.h"
 #include "instru.h"
 #include "archive_ostream.h"
+#include "reader.h"
 #include <fstream>
 #include "hashtable.h"
 #include <vector>
@@ -440,7 +444,13 @@ public:
                 reinterpret_cast<app_pc>(entry->start_pc);
         } else {
             size_t idx = static_cast<size_t>(modidx); // Avoid win32 warnings.
-            return map_pc - modvec_[idx].map_seg_base + modvec_[idx].orig_seg_base;
+            app_pc res = map_pc - modvec_[idx].map_seg_base + modvec_[idx].orig_seg_base;
+#ifdef ARM
+            // Match Thumb vs Arm mode by setting LSB.
+            if (TESTANY(1, modoffs))
+                res = reinterpret_cast<app_pc>(reinterpret_cast<uint64>(res) | 1);
+#endif
+            return res;
         }
     }
 
@@ -654,6 +664,11 @@ struct trace_header_t {
  * are the last values in a record, they belong to the next record of the same
  * thread.</LI>
  *
+ * <LI>bool delayed_branches_exist(void *tls)
+ *
+ * Returns true if there are currently delayed branches that have not been emitted
+ * yet.</LI>
+ *
  * <LI>std::string append_delayed_branch(void *tls)
  *
  * Flush the branches sent to write_delayed_branches().</LI>
@@ -676,6 +691,19 @@ struct trace_header_t {
  * <LI>void add_to_statistic(void *tls, raw2trace_statistic_t stat, int value)
  *
  * Increases the per-thread counter for the statistic identified by stat by value.
+ * </LI>
+ *
+ * <LI>bool raw2trace_t::record_encoding_emitted(void *tls, app_pc pc)
+ *
+ * Returns false if an encoding was already emitted.
+ * Otherwise, remembers that an encoding is being emitted now, and returns true.
+ * </LI>
+ *
+ * <LI>void raw2trace_t::rollback_last_encoding(void *tls)
+ *
+ * Removes the record of the last encoding remembered in record_encoding_emitted().
+ * This can only be called once between calls to record_encoding_emitted()
+ * and only after record_encoding_emitted() returns true.
  * </LI>
  *
  * <LI>bool raw2trace_t::instr_summary_exists(void *tls, uint64 modidx, uint64 modoffs,
@@ -799,6 +827,23 @@ protected:
                     buf, (trace_marker_type_t)in_entry->extended.valueB, marker_val);
                 if (in_entry->extended.valueB == TRACE_MARKER_TYPE_KERNEL_EVENT) {
                     impl()->log(4, "Signal/exception between bbs\n");
+                }
+                // If there is currently a delayed branch that has not been emitted yet,
+                // delay most markers since intra-block markers can cause issues with
+                // tools that do not expect markers amid records for a single instruction
+                // or inside a basic block. We don't delay TRACE_MARKER_TYPE_CPU_ID which
+                // identifies the CPU on which subsequent records were collected and
+                // OFFLINE_TYPE_TIMESTAMP which is handled at a higher level in
+                // process_next_thread_buffer() so there is no need to have a separate
+                // check for it here.
+                if (in_entry->extended.valueB != TRACE_MARKER_TYPE_CPU_ID) {
+                    if (impl()->delayed_branches_exist(tls)) {
+                        std::string error = impl()->write_delayed_branches(
+                            tls, buf_base, reinterpret_cast<trace_entry_t *>(buf));
+                        if (!error.empty())
+                            return error;
+                        return "";
+                    }
                 }
                 impl()->log(3, "Appended marker type %u value " PIFX "\n",
                             (trace_marker_type_t)in_entry->extended.valueB,
@@ -1124,7 +1169,9 @@ private:
         app_pc pc, decode_pc = start_pc;
         if (in_entry->pc.modidx == PC_MODIDX_INVALID) {
             impl()->log(3, "Appending %u instrs in bb " PFX " in generated code\n",
-                        instr_count, (ptr_uint_t)start_pc);
+                        instr_count,
+                        reinterpret_cast<ptr_uint_t>(modmap_().get_orig_pc(
+                            in_entry->pc.modidx, in_entry->pc.modoffs)));
         } else if ((in_entry->pc.modidx == 0 && in_entry->pc.modoffs == 0) ||
                    modvec_()[in_entry->pc.modidx].map_seg_base == NULL) {
             if (impl()->get_version(tls) >= OFFLINE_FILE_VERSION_ENCODINGS) {
@@ -1213,7 +1260,13 @@ private:
                 if (!error.empty())
                     return error;
             }
-            // TODO i#1729: make bundles via lazy accum until hit memref/end.
+            if (!skip_icache && impl()->record_encoding_emitted(tls, decode_pc)) {
+                error = append_encoding(instr, buf, buf_start, decode_pc);
+                if (!error.empty())
+                    return error;
+            }
+            // XXX i#1729: make bundles via lazy accum until hit memref/end, if
+            // we don't need encodings.
             buf->type = instr->type();
             if (buf->type == TRACE_TYPE_INSTR_MAYBE_FETCH) {
                 // We want it to look like the original rep string, with just one instr
@@ -1235,6 +1288,7 @@ private:
             buf->size = (ushort)(skip_icache ? 0 : instr->length());
             buf->addr = (addr_t)orig_pc;
             ++buf;
+            impl()->log(4, "Appended instr fetch for original %p\n", orig_pc);
             decode_pc = pc;
             // Check for a signal *after* the instruction.  The trace is recording
             // instruction *fetches*, not instruction retirement, and we want to
@@ -1317,7 +1371,9 @@ private:
                 // than here (and we are ok bailing on doing this for online traces), so
                 // we handle it in post-processing by delaying a thread-block-final branch
                 // (and its memrefs) to that thread's next block.  This changes the
-                // timestamp of the branch, which we live with.
+                // timestamp of the branch, which we live with. To avoid marker
+                // misplacement (e.g. in the middle of a basic block), we also
+                // delay markers.
                 impl()->log(4, "Delaying %d entries\n", buf - buf_start);
                 error = impl()->write_delayed_branches(tls, buf_start, buf);
                 if (!error.empty())
@@ -1334,10 +1390,44 @@ private:
         return "";
     }
 
+    std::string
+    append_encoding(const instr_summary_t *instr, trace_entry_t *&buf,
+                    trace_entry_t *buf_start, app_pc pc)
+    {
+        size_t size_left = instr->length();
+        size_t offs = 0;
+#ifdef ARM
+        // Remove any Thumb LSB.
+        pc = dr_app_pc_as_load_target(DR_ISA_ARM_THUMB, pc);
+#endif
+        do {
+            buf->type = TRACE_TYPE_ENCODING;
+            buf->size =
+                static_cast<unsigned short>(std::min(size_left, sizeof(buf->encoding)));
+            memcpy(buf->encoding, pc + offs, buf->size);
+            if (buf->size < sizeof(buf->encoding)) {
+                // We don't have to set the rest to 0 but it is nice.
+                memset(buf->encoding + buf->size, 0, sizeof(buf->encoding) - buf->size);
+            }
+            impl()->log(4, "Appended encoding entry for %p sz=%zu 0x%08x...\n", pc,
+                        buf->size, *(int *)buf->encoding);
+            offs += buf->size;
+            size_left -= buf->size;
+            ++buf;
+            DR_CHECK(static_cast<size_t>(buf - buf_start) < WRITE_BUFFER_SIZE,
+                     "Too many entries for write buffer");
+        } while (size_left > 0);
+        return "";
+    }
+
     // Returns true if a kernel interrupt happened at cur_pc.
     // Outputs a kernel interrupt if this is the right location.
     // Outputs any other markers observed if !instrs_are_separate, since they
-    // are part of this block and need to be inserted now.
+    // are part of this block and need to be inserted now. Inserts all
+    // intra-block markers (i.e., the higher level process_offline_entry() will
+    // never insert a marker intra-block) and all inter-block markers are
+    // handled at a higher level (process_offline_entry()) and are never
+    // inserted here.
     std::string
     handle_kernel_interrupt_and_markers(void *tls, INOUT trace_entry_t **buf_in,
                                         uint64_t cur_pc, uint64_t cur_offs,
@@ -1405,15 +1495,23 @@ private:
                         // includes the rseq committing store before the native rseq
                         // execution hits the native abort.  Pretend the native abort
                         // happened *before* the committing store by walking the store
-                        // backward.
-                        trace_type_t skipped_type;
-                        do {
-                            impl()->log(4, "Rolling back entry for rseq abort\n");
-                            --*buf_in;
-                            skipped_type = static_cast<trace_type_t>((*buf_in)->type);
-                            DR_ASSERT(*buf_in >= buf_start);
-                        } while (!type_is_instr(skipped_type) &&
-                                 skipped_type != TRACE_TYPE_INSTR_NO_FETCH);
+                        // backward.  Everything in the buffer is for the store;
+                        // there should be no (other) intra-bb markers not for the store.
+                        impl()->log(4, "Rolling back %d entries for rseq abort\n",
+                                    *buf_in - buf_start);
+                        // If we recorded and emitted an encoding we would not emit
+                        // it next time and be missing the encoding so we must clear
+                        // the cache for that entry.  This will only happen once
+                        // for any new encoding (one synchronous signal/rseq abort
+                        // per instr) so we will satisfy the one-time limit of
+                        // rollback_last_encoding() (it has an assert to verify).
+                        for (trace_entry_t *entry = buf_start; entry < *buf_in; ++entry) {
+                            if (entry->type == TRACE_TYPE_ENCODING) {
+                                impl()->rollback_last_encoding(tls);
+                                break;
+                            }
+                        }
+                        *buf_in = buf_start;
                     }
                 } else {
                     // Put it back (below). We do not have a problem with other markers
@@ -1545,7 +1643,8 @@ private:
             have_type = true;
             buf->type = in_entry->extended.valueB;
             buf->size = in_entry->extended.valueA;
-            impl()->log(4, "Found type entry type %d size %d\n", buf->type, buf->size);
+            impl()->log(4, "Found type entry type %s (%d) size %d\n",
+                        trace_type_names[buf->type], buf->type, buf->size);
             in_entry = impl()->get_next_entry(tls);
             if (in_entry == nullptr)
                 return "Trace ends mid-block";
@@ -1606,8 +1705,9 @@ private:
             // We stored only the base reg, as an optimization.
             buf->addr += opnd_get_disp(memref.opnd);
         }
-        impl()->log(4, "Appended memref type %d size %d to " PFX "\n", buf->type,
-                    buf->size, (ptr_uint_t)buf->addr);
+        impl()->log(4, "Appended memref type %s (%d) size %d to " PFX "\n",
+                    trace_type_names[buf->type], buf->type, buf->size,
+                    (ptr_uint_t)buf->addr);
 
 #ifdef AARCH64
         // TODO i#4400: Following is a workaround to correctly represent DC ZVA in
@@ -1631,6 +1731,70 @@ private:
 #undef DR_CHECK
 };
 
+// We need to determine the memref_t record count for inserting a marker with
+// that count at the start of each chunk.
+class memref_counter_t : public reader_t {
+public:
+    bool
+    init() override
+    {
+        return true;
+    }
+    trace_entry_t *
+    read_next_entry() override
+    {
+        return nullptr;
+    };
+    bool
+    read_next_thread_entry(size_t thread_index, OUT trace_entry_t *entry,
+                           OUT bool *eof) override
+    {
+        return false;
+    }
+    std::string
+    get_stream_name() const override
+    {
+        return "";
+    }
+    int
+    entry_memref_count(const trace_entry_t *entry)
+    {
+        // Mirror file_reader_t::open_input_files().
+        // In particular, we need to skip TRACE_TYPE_HEADER and to pass the
+        // tid and pid to the reader before the 2 markers in front of them.
+        if (!saw_pid_) {
+            if (entry->type == TRACE_TYPE_HEADER)
+                return 0;
+            else if (entry->type == TRACE_TYPE_THREAD) {
+                list_.push_front(*entry);
+                return 0;
+            } else if (entry->type != TRACE_TYPE_PID) {
+                list_.push_back(*entry);
+                return 0;
+            }
+            saw_pid_ = true;
+            auto it = list_.begin();
+            ++it;
+            list_.insert(it, *entry);
+            int count = 0;
+            for (auto &next : list_) {
+                input_entry_ = &next;
+                if (process_input_entry())
+                    ++count;
+            }
+            return count;
+        }
+        if (entry->type == TRACE_TYPE_FOOTER)
+            return 0;
+        input_entry_ = const_cast<trace_entry_t *>(entry);
+        return process_input_entry() ? 1 : 0;
+    }
+
+private:
+    bool saw_pid_ = false;
+    std::list<trace_entry_t> list_;
+};
+
 /**
  * The raw2trace class converts the raw offline trace format to the format
  * expected by analysis tools.  It requires access to the binary files for the
@@ -1640,13 +1804,15 @@ class raw2trace_t : public trace_converter_t<raw2trace_t> {
 public:
     // Only one of out_files and out_archives should be non-empty: archives support fast
     // seeking and are preferred but require zlib.
-    // module_map, encoding_file, thread_files, and out_files are all owned and
-    // opened/closed by the caller.  module_map is not a string and can contain binary
-    // data.
+    // module_map, encoding_file, serial_schedule_file, cpu_schedule_file, thread_files,
+    // and out_files are all owned and opened/closed by the caller.  module_map is not a
+    // string and can contain binary data.
     raw2trace_t(const char *module_map, const std::vector<std::istream *> &thread_files,
                 const std::vector<std::ostream *> &out_files,
                 const std::vector<archive_ostream_t *> &out_archives,
-                file_t encoding_file = INVALID_FILE, void *dcontext = nullptr,
+                file_t encoding_file = INVALID_FILE,
+                std::ostream *serial_schedule_file = nullptr,
+                archive_ostream_t *cpu_schedule_file = nullptr, void *dcontext = nullptr,
                 unsigned int verbosity = 0, int worker_count = -1,
                 const std::string &alt_module_dir = "",
                 uint64_t chunk_instr_count = 10 * 1000 * 1000);
@@ -1780,6 +1946,10 @@ protected:
             , last_block_summary(nullptr)
         {
         }
+        // Support subclasses extending this struct.
+        virtual ~raw2trace_thread_data_t()
+        {
+        }
 
         int index;
         thread_id_t tid;
@@ -1815,9 +1985,17 @@ protected:
         uint64 count_elided = 0;
 
         uint64 cur_chunk_instr_count = 0;
+        uint64 cur_chunk_ref_count = 0;
+        memref_counter_t memref_counter;
         uint64 chunk_count_ = 0;
         uint64 last_timestamp_ = 0;
         uint last_cpu_ = 0;
+
+        std::set<app_pc> encoding_emitted;
+        app_pc last_encoding_emitted = nullptr;
+
+        std::vector<schedule_entry_t> sched;
+        std::unordered_map<uint64_t, std::vector<schedule_entry_t>> cpu2sched;
     };
 
     virtual std::string
@@ -1831,6 +2009,9 @@ protected:
     process_next_thread_buffer(raw2trace_thread_data_t *tdata, OUT bool *end_of_record);
 
     std::string
+    aggregate_and_write_schedule_files();
+
+    std::string
     write_footer(void *tls);
 
     std::string
@@ -1839,6 +2020,8 @@ protected:
     uint64 count_elided_ = 0;
 
     std::unique_ptr<module_mapper_t> module_mapper_;
+
+    std::vector<std::unique_ptr<raw2trace_thread_data_t>> thread_data_;
 
 private:
     friend class trace_converter_t<raw2trace_t>;
@@ -1859,6 +2042,14 @@ private:
     std::string
     write_delayed_branches(void *tls, const trace_entry_t *start,
                            const trace_entry_t *end);
+    bool
+    delayed_branches_exist(void *tls);
+    bool
+    record_encoding_emitted(void *tls, app_pc pc);
+    // This can only be called once between calls to record_encoding_emitted()
+    // and only after record_encoding_emitted() returns true.
+    void
+    rollback_last_encoding(void *tls);
     bool
     instr_summary_exists(void *tls, uint64 modidx, uint64 modoffs, app_pc block_start,
                          int index, app_pc pc);
@@ -1910,8 +2101,6 @@ private:
 
     std::string
     emit_new_chunk_header(raw2trace_thread_data_t *tdata);
-
-    std::vector<raw2trace_thread_data_t> thread_data_;
 
     int worker_count_;
     std::vector<std::vector<raw2trace_thread_data_t *>> worker_tasks_;
@@ -2012,6 +2201,8 @@ private:
 
     const char *modmap_;
     file_t encoding_file_ = INVALID_FILE;
+    std::ostream *serial_schedule_file_ = nullptr;
+    archive_ostream_t *cpu_schedule_file_ = nullptr;
 
     unsigned int verbosity_ = 0;
 

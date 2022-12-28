@@ -3968,6 +3968,18 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
     bb->end_pc = bb->cur_pc;
     BBPRINT(bb, 3, "end_pc = " PFX "\n\n", bb->end_pc);
 
+#ifdef LINUX
+    if (TEST(FRAG_HAS_RSEQ_ENDPOINT, bb->flags)) {
+        instr_t *label = INSTR_CREATE_label(dcontext);
+        instr_set_note(label, (void *)DR_NOTE_REG_BARRIER);
+        /* We want the label after the final rseq instruction.  We've
+         * truncated the block after that instruction so bb->instr may
+         * be NULL so we append.
+         */
+        instrlist_meta_append(bb->ilist, label);
+    }
+#endif
+
     /* We could put this in check_new_page_jmp where it already checks
      * for native_exec overlap, but selfmod ubrs don't even call that routine
      */

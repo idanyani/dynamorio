@@ -1608,7 +1608,7 @@ drwrap_replace_native_bb(void *drcontext, instrlist_t *bb, instr_t *inst, app_pc
     instrlist_meta_append(bb,
                           INSTR_CREATE_jmp(drcontext, opnd_create_pc(rn->replacement)));
 #endif
-    instrlist_append(bb, INSTR_XL8(INSTR_CREATE_nop(drcontext), pc));
+    instrlist_append(bb, INSTR_XL8(XINST_CREATE_nop(drcontext), pc));
 }
 
 /* event for function replacing */
@@ -2592,7 +2592,7 @@ drwrap_event_restore_state_ex(void *drcontext, bool restore_memory,
                 scan_stop = (app_pc *)pt->app_esp[i + 1];
             else
                 scan_stop = (app_pc *)info->mcontext->xsp;
-            for (app_pc *scan = (app_pc *)pt->app_esp[i]; scan <= scan_stop; --scan) {
+            for (app_pc *scan = (app_pc *)pt->app_esp[i]; scan >= scan_stop; --scan) {
                 app_pc ra = get_retaddr_from_stack((reg_t)scan);
                 if (ra == (app_pc)replace_retaddr_sentinel) {
                     NOTIFY(1,

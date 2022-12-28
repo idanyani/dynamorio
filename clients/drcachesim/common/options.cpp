@@ -33,6 +33,7 @@
 /* shared options for both the frontend and the client */
 
 #include <string>
+#include "dr_api.h" // For IF_X86_ELSE.
 #include "droption.h"
 #include "options.h"
 
@@ -121,6 +122,12 @@ droption_t<bytesize_t> op_chunk_instr_count(
     "This only applies when generating .zip-format traces; when built without "
     "support for writing .zip files, this option is ignored. "
     "For 32-bit this cannot exceed 4G.");
+
+droption_t<bool> op_instr_encodings(
+    DROPTION_SCOPE_CLIENT, "instr_encodings", false,
+    "Whether to include encodings for online tools",
+    "By default instruction encodings are not sent to online tools, to reduce "
+    "overhead.  (Offline tools have them added by default.)");
 
 droption_t<std::string> op_funclist_file(
     DROPTION_SCOPE_ALL, "funclist_file", "",
@@ -278,6 +285,19 @@ droption_t<bytesize_t> op_max_global_trace_refs(
     "Once reached, instrumented execution continues, but no further data is recorded. "
     "This is similar to -exit_after_tracing but without terminating the process."
     "The reference count is approximate.");
+
+droption_t<bool> op_align_endpoints(
+    // XXX i#2039,i#5686: Make this true by default (and maybe remove it altogether) once
+    // robustness issues with drbbdup are fixed (restore state for scatter/gather and
+    // other libs; yet-undiagnosed other state restore issues) on x86.
+    DROPTION_SCOPE_CLIENT, "align_endpoints", IF_X86_ELSE(false, true),
+    "Nop tracing when partially attached or detached",
+    "When using attach/detach to trace a burst, the attach and detach processes are "
+    "staggered, with the set of threads producing trace data incrementally growing or "
+    "shrinking.  This results in uneven thread activity at the start and end of the "
+    "burst.  If this option is enabled, tracing is nop-ed until fully attached to "
+    "all threads and is nop-ed as soon as detach starts, eliminating the unevenness. "
+    "This also allows omitting threads that did nothing during the burst.");
 
 droption_t<bytesize_t> op_trace_after_instrs(
     DROPTION_SCOPE_CLIENT, "trace_after_instrs", 0,
@@ -468,12 +488,22 @@ droption_t<int>
                    "For simulator types that support it, limits analyis to the single "
                    "thread with the given identifier.  0 enables all threads.");
 
+droption_t<bytesize_t> op_skip_instrs(
+    DROPTION_SCOPE_FRONTEND, "skip_instrs", 0, "Number of instructions to skip",
+    "Specifies the number of instructions to skip in the beginning of the trace "
+    "analysis.  For serial iteration, this number is "
+    "computed just once across the interleaving sequence of all threads; for parallel "
+    "iteration, each thread skips this many insructions.  When built with zipfile "
+    "support, this skipping is optimized and large instruction counts can be quickly "
+    "skipped; this is not the case for -skip_refs.");
+
 droption_t<bytesize_t>
     op_skip_refs(DROPTION_SCOPE_FRONTEND, "skip_refs", 0,
                  "Number of memory references to skip",
-                 "Specifies the number of references to skip "
-                 "in the beginning of the application execution. "
-                 "These memory references are dropped instead of being simulated.");
+                 "Specifies the number of references to skip in the beginning of the "
+                 "application execution. These memory references are dropped instead "
+                 "of being simulated.  This skipping may be slow for large skip values; "
+                 "consider -skip_instrs for a faster method of skipping.");
 
 droption_t<bytesize_t> op_warmup_refs(
     DROPTION_SCOPE_FRONTEND, "warmup_refs", 0,

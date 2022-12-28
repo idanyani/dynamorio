@@ -41,6 +41,27 @@ else ()
   set(os_name "unix")
   # Ditto.
   add_definitions(-DUNIX)
+  if (LINUX)
+    add_definitions(-DLINUX)
+  elseif (APPLE)
+    add_definitions(-DMACOS)
+  endif ()
+endif ()
+# Ditto here, in particular for options.cpp.
+if (X86)
+  if (X64)
+    add_definitions(-DX86_64)
+  else ()
+    add_definitions(-DX86_32)
+  endif ()
+elseif (AARCHXX)
+  if (X64)
+    add_definitions(-DARM_64)
+  else ()
+    add_definitions(-DARM_32)
+  endif ()
+elseif (RISCV64)
+    add_definitions(-DRISCV_64)
 endif ()
 
 # GCC 6+ has a warning for an ABI change due to a bug introduced in GCC 5:
@@ -74,13 +95,19 @@ if (ZLIB_FOUND)
       "until then, disabling zip output and fast seeking")
     set(zip_reader "")
     set(zlib_libs ${ZLIB_LIBRARIES})
+    set(ZIP_FOUND OFF)
   else ()
     file(GLOB minizip_srcs "${minizip_dir}/*.c")
     if (NOT WIN32)
       list(REMOVE_ITEM minizip_srcs "${minizip_dir}/iowin32.c")
     endif ()
     add_library(minizip STATIC ${minizip_srcs})
+    if (APPLE)
+      append_property_string(TARGET minizip
+        COMPILE_FLAGS "-mmacosx-version-min=${OLDEST_OSX_SUPPPORTED}")
+    endif ()
     add_definitions(-DHAS_ZIP)
+    set(ZIP_FOUND ON)
     # We add "minizip/" to avoid collisions with system "zip.h" on Mac.
     include_directories(${minizip_dir}/..)
     DR_export_target(minizip)
@@ -134,6 +161,7 @@ add_exported_library(drmemtrace_basic_counts STATIC tools/basic_counts.cpp)
 add_exported_library(drmemtrace_opcode_mix STATIC tools/opcode_mix.cpp)
 add_exported_library(drmemtrace_view STATIC tools/view.cpp)
 add_exported_library(drmemtrace_func_view STATIC tools/func_view.cpp)
+
 configure_DynamoRIO_standalone(drmemtrace_opcode_mix)
 configure_DynamoRIO_standalone(drmemtrace_view)
 
@@ -154,6 +182,14 @@ add_exported_library(drmemtrace_simulator STATIC
   simulator/tlb_simulator.cpp
   )
 
+add_exported_library(drmemtrace_record_filter STATIC
+  tools/filter/record_filter.cpp
+  tools/filter/cache_filter.h
+  tools/filter/cache_filter.cpp
+  tools/filter/type_filter.h
+  tools/filter/null_filter.h)
+target_link_libraries(drmemtrace_record_filter drmemtrace_simulator)
+
 add_exported_library(directory_iterator STATIC common/directory_iterator.cpp)
 add_dependencies(directory_iterator api_headers)
 target_link_libraries(directory_iterator drfrontendlib)
@@ -168,11 +204,12 @@ set(raw2trace_srcs
   tracer/instru.cpp
   tracer/instru_online.cpp
   tracer/instru_offline.cpp
+  reader/reader.cpp
+  common/trace_entry.cpp
   )
 if (libsnappy)
   set(raw2trace_srcs ${raw2trace_srcs}
     ${snappy_reader}
-    reader/reader.cpp
     reader/file_reader.cpp
     )
 endif ()
@@ -196,6 +233,7 @@ set(drcachesim_srcs
   reader/reader.cpp
   reader/config_reader.cpp
   reader/file_reader.cpp
+  reader/record_file_reader.cpp
   ${zlib_reader}
   ${zip_reader}
   ${snappy_reader}
@@ -227,6 +265,7 @@ use_DynamoRIO_extension(drcachesim drutil_static)
 
 # This is to avoid ../ and common/ in the #includes of headers that we
 # export in a single dir for 3rd-party tool integration.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/simulator)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/common)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/reader)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tracer)
@@ -238,6 +277,7 @@ add_exported_library(drmemtrace_analyzer STATIC
   reader/reader.cpp
   reader/config_reader.cpp
   reader/file_reader.cpp
+  reader/record_file_reader.cpp
   ${zlib_reader}
   ${zip_reader}
   ${snappy_reader}
@@ -252,7 +292,9 @@ link_with_pthread(drmemtrace_analyzer)
 install_client_nonDR_header(drmemtrace common/utils.h)
 install_client_nonDR_header(drmemtrace common/trace_entry.h)
 install_client_nonDR_header(drmemtrace common/memref.h)
+install_client_nonDR_header(drmemtrace common/memtrace_stream.h)
 install_client_nonDR_header(drmemtrace reader/reader.h)
+install_client_nonDR_header(drmemtrace reader/record_file_reader.h)
 install_client_nonDR_header(drmemtrace analysis_tool.h)
 install_client_nonDR_header(drmemtrace analyzer.h)
 install_client_nonDR_header(drmemtrace tools/reuse_distance_create.h)
@@ -287,6 +329,11 @@ add_executable(prefetch_analyzer_launcher
 target_link_libraries(prefetch_analyzer_launcher drmemtrace_analyzer drfrontendlib)
 use_DynamoRIO_extension(prefetch_analyzer_launcher droption)
 add_dependencies(prefetch_analyzer_launcher api_headers)
+
+add_executable(record_filter_launcher
+  tools/record_filter_launcher.cpp)
+target_link_libraries(record_filter_launcher drmemtrace_analyzer drmemtrace_record_filter)
+use_DynamoRIO_extension(record_filter_launcher droption)
 
 # We have a companion test built using a separate --build-and-test CMake project in
 # tests/analyzer_separate.cpp to better test 3rd-party usage.
@@ -340,6 +387,7 @@ macro(add_drmemtrace name type)
   if (BUILD_PT_TRACER)
     set(drmemtrace_srcs ${drmemtrace_srcs}
       tracer/syscall_pt_trace.cpp
+      tracer/kcore_copy.cpp
     )
     add_definitions(-DBUILD_PT_TRACER)
   endif ()
@@ -420,6 +468,7 @@ endmacro()
 restore_nonclient_flags(drcachesim)
 restore_nonclient_flags(drraw2trace)
 restore_nonclient_flags(histogram_launcher)
+restore_nonclient_flags(record_filter_launcher)
 restore_nonclient_flags(prefetch_analyzer_launcher)
 if (NOT AARCH64 AND NOT APPLE)
   restore_nonclient_flags(opcode_mix_launcher)
@@ -433,6 +482,7 @@ restore_nonclient_flags(drmemtrace_basic_counts)
 restore_nonclient_flags(drmemtrace_opcode_mix)
 restore_nonclient_flags(drmemtrace_view)
 restore_nonclient_flags(drmemtrace_func_view)
+restore_nonclient_flags(drmemtrace_record_filter)
 restore_nonclient_flags(drmemtrace_analyzer)
 
 # We need to pass /EHsc and we pull in libcmtd into drcachesim from a dep lib.
@@ -462,7 +512,8 @@ macro(add_win32_flags target)
     endif ()
     if (APPLE)
       # Match the core/ flags.
-      append_property_string(TARGET ${target} COMPILE_FLAGS "-mmacosx-version-min=10.9")
+      append_property_string(TARGET ${target}
+        COMPILE_FLAGS "-mmacosx-version-min=${OLDEST_OSX_SUPPPORTED}")
     endif ()
   endif ()
 endmacro ()
@@ -470,6 +521,7 @@ endmacro ()
 add_win32_flags(drcachesim)
 add_win32_flags(drraw2trace)
 add_win32_flags(histogram_launcher)
+add_win32_flags(record_filter_launcher)
 add_win32_flags(prefetch_analyzer_launcher)
 add_win32_flags(drmemtrace_raw2trace)
 if (NOT AARCH64 AND NOT APPLE)
@@ -484,6 +536,7 @@ add_win32_flags(drmemtrace_basic_counts)
 add_win32_flags(drmemtrace_opcode_mix)
 add_win32_flags(drmemtrace_view)
 add_win32_flags(drmemtrace_func_view)
+add_win32_flags(drmemtrace_record_filter)
 add_win32_flags(drmemtrace_analyzer)
 add_win32_flags(directory_iterator)
 if (WIN32 AND DEBUG)
@@ -605,7 +658,24 @@ if (BUILD_TESTS)
   add_test(NAME tool.drcacheoff.raw2trace_unit_tests
     COMMAND tool.drcacheoff.raw2trace_unit_tests)
 
-  if (DR_HOST_AARCH64)
+  # XXX i#5675: add tests for other environments. Currently, the repository does not have
+  # a checked-in post-processed trace for x86-32 or AArchXX.
+  if (X86 AND X64 AND ZLIB_FOUND)
+    set(trace_dir
+      "${PROJECT_SOURCE_DIR}/clients/drcachesim/tests/drmemtrace.threadsig.x64.tracedir")
+    set(tmp_output_dir ${PROJECT_BINARY_DIR}/record_filter_tests_tmp_output)
+    file(MAKE_DIRECTORY ${tmp_output_dir})
+    add_executable(tool.drcacheoff.record_filter_unit_tests
+                   tests/record_filter_unit_tests.cpp)
+    configure_DynamoRIO_standalone(tool.drcacheoff.record_filter_unit_tests)
+    target_link_libraries(tool.drcacheoff.record_filter_unit_tests drmemtrace_analyzer
+      drmemtrace_basic_counts drmemtrace_record_filter)
+    add_test(NAME tool.drcacheoff.record_filter_unit_tests
+             COMMAND tool.drcacheoff.record_filter_unit_tests --trace_dir
+                     ${trace_dir} --tmp_output_dir ${tmp_output_dir})
+  endif ()
+
+  if (DR_HOST_AARCH64 AND NOT APPLE) # i#1997: static DR on Mac NYI.
     add_executable(tool.drcacheoff.burst_aarch64_sys tests/burst_aarch64_sys.cpp)
     configure_DynamoRIO_static(tool.drcacheoff.burst_aarch64_sys)
     use_DynamoRIO_static_client(tool.drcacheoff.burst_aarch64_sys drmemtrace_static)
@@ -676,6 +746,7 @@ if (BUILD_TESTS)
     add_win32_flags(tool.drcacheoff.burst_replaceall)
     use_DynamoRIO_extension(tool.drcacheoff.burst_replaceall drcontainers)
     use_DynamoRIO_drmemtrace_tracer(tool.drcacheoff.burst_replaceall)
+    link_with_pthread(tool.drcacheoff.burst_replaceall)
 
     add_executable(tool.drcacheoff.burst_malloc tests/burst_malloc.cpp)
     configure_DynamoRIO_static(tool.drcacheoff.burst_malloc)
@@ -770,6 +841,21 @@ if (BUILD_TESTS)
     use_DynamoRIO_extension(tool.drcacheoff.burst_traceopts drcovlib_static)
 
   endif ()
+
+  if (X86 AND X64 AND ZIP_FOUND)
+    # XXX i#5538: Add trace files for other arches.
+    set(zip_path
+      "${PROJECT_SOURCE_DIR}/clients/drcachesim/tests/drmemtrace.allasm_x86_64.trace.zip")
+    add_executable(tool.drcacheoff.skip_unit_tests tests/skip_unit_tests.cpp)
+    configure_DynamoRIO_standalone(tool.drcacheoff.skip_unit_tests)
+    target_link_libraries(tool.drcacheoff.skip_unit_tests drmemtrace_analyzer
+      drmemtrace_view drmemtrace_raw2trace)
+    use_DynamoRIO_extension(tool.drcacheoff.skip_unit_tests drreg_static)
+    use_DynamoRIO_extension(tool.drcacheoff.skip_unit_tests drcovlib_static)
+    use_DynamoRIO_extension(tool.drcacheoff.skip_unit_tests drdecode)
+    add_test(NAME tool.drcacheoff.skip_unit_tests
+             COMMAND tool.drcacheoff.skip_unit_tests --trace_file ${zip_path})
+  endif ()
 endif ()
 
 ##################################################
@@ -784,11 +870,14 @@ add_executable(drcachesim_ops
 set_target_properties(drcachesim_ops PROPERTIES COMPILE_FLAGS "${ORIG_CMAKE_CXX_FLAGS}")
 add_win32_flags(drcachesim_ops)
 use_DynamoRIO_extension(drcachesim_ops droption)
+add_dependencies(drcachesim_ops api_headers)
 
 # We then have to insert it into the doxygen files at build time:
-set(srcdoc ${CMAKE_CURRENT_SOURCE_DIR}/drcachesim.dox.in)
-set(gendoc ${CMAKE_CURRENT_BINARY_DIR}/drcachesim.dox)
+set(srcdoc ${CMAKE_CURRENT_SOURCE_DIR}/docs/drcachesim.dox.in)
+set(gendoc ${CMAKE_CURRENT_BINARY_DIR}/docs/drcachesim.dox)
 set(doctgt drcachesim_docs)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/docs/new-features-encodings-seek.pdf
+  ${CMAKE_CURRENT_BINARY_DIR}/docs/new-features-encodings-seek.pdf COPYONLY)
 
 get_property(dox_extras GLOBAL PROPERTY DynamoRIO_dox_extras)
 set_property(GLOBAL PROPERTY DynamoRIO_dox_extras ${dox_extras} ${gendoc})

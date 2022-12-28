@@ -62,8 +62,8 @@ protected:
     {
         if (!condition) {
             errors.push_back(invariant_name);
-            error_tids.push_back(shard->tid);
-            error_refs.push_back(shard->ref_count);
+            error_tids.push_back(shard->tid_);
+            error_refs.push_back(shard->ref_count_);
         }
     }
 };
@@ -240,6 +240,38 @@ check_kernel_xfer()
             gen_instr(1, 101),
             // XXX: This marker value is actually not guaranteed, yet the checker
             // requires it and the view tool prints it.
+            gen_marker(1, TRACE_MARKER_TYPE_KERNEL_XFER, 102),
+            gen_instr(1, 2),
+        };
+        if (!run_checker(memrefs, false))
+            return false;
+    }
+    // Signal before any instr in the trace.
+    {
+        std::vector<memref_t> memrefs = {
+            // No instr in the beginning here.
+            gen_marker(1, TRACE_MARKER_TYPE_KERNEL_EVENT, 2),
+            gen_instr(1, 101),
+            // XXX: This marker value is actually not guaranteed, yet the checker
+            // requires it and the view tool prints it.
+            gen_marker(1, TRACE_MARKER_TYPE_KERNEL_XFER, 102),
+            gen_instr(1, 2),
+        };
+        if (!run_checker(memrefs, false))
+            return false;
+    }
+    // Nested signals without any intervening instr.
+    {
+        std::vector<memref_t> memrefs = {
+            gen_instr(1, 1),
+            gen_marker(1, TRACE_MARKER_TYPE_KERNEL_EVENT, 2),
+            // No intervening instr here.
+            gen_marker(1, TRACE_MARKER_TYPE_KERNEL_EVENT, 101),
+            gen_instr(1, 201),
+            // XXX: This marker value is actually not guaranteed, yet the checker
+            // requires it and the view tool prints it.
+            gen_marker(1, TRACE_MARKER_TYPE_KERNEL_XFER, 202),
+            gen_instr(1, 101),
             gen_marker(1, TRACE_MARKER_TYPE_KERNEL_XFER, 102),
             gen_instr(1, 2),
         };

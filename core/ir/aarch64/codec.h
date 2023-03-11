@@ -44,7 +44,7 @@ typedef enum {
     DOUBLE_REG = 3,
     QUAD_REG = 4,
     Z_REG = 5,
-    NOT_A_REG = DR_REG_INVALID
+    NOT_A_REG = 255
 } aarch64_reg_offset;
 
 byte *
@@ -73,5 +73,16 @@ encode_common(byte *pc, instr_t *i, decode_info_t *di);
  */
 #    define OPSZ_SVE_VL opnd_size_from_bytes(dr_get_sve_vl() / 8)
 #endif
+
+#define RETURN_FALSE                                           \
+    CLIENT_ASSERT(false, "Unexpected state in AArch64 codec"); \
+    return false;
+
+// Frustratingly vera++ fails if RETURN_FALSE is referenced inside this macro
+#define IF_RETURN_FALSE(condition)                                 \
+    if (condition) {                                               \
+        CLIENT_ASSERT(false, "Unexpected state in AArch64 codec"); \
+        return false;                                              \
+    }
 
 #endif /* CODEC_H */
